@@ -12,7 +12,7 @@ HERE = os.path.abspath(os.path.dirname(__file__))
 
 def get_requirements(reqfile):
     path = os.path.join(HERE, reqfile)
-    deps = set()
+    deps = list()
     for dep in req.parse_requirements(path, session=download.PipSession()):
         try:
             # Pip 8.1.2 Compatible
@@ -29,14 +29,14 @@ def get_requirements(reqfile):
             specs=specs,
         )
 
-        deps.add(requirement)
+        deps.append(requirement)
     return deps
 
 
 setuptools.setup(
-    name='device-manager',
+    name='DeviceManager',
     description='Dojot device manager.',
-    version=':versiontools:device-manager:',
+    version=':versiontools:DeviceManager:',
 
     packages=setuptools.find_packages(),
     include_package_data=True,
