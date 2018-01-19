@@ -10,7 +10,7 @@ from flask import request
 from flask import make_response
 from flask import Blueprint
 from utils import *
-from BackendHandler import BackendHandler, IotaHandler, PersistenceHandler, OrionHandler, KafkaHandler
+from BackendHandler import OrionHandler, KafkaHandler, PersistenceHandler
 from sqlalchemy.exc import IntegrityError
 
 from DatabaseModels import *
@@ -25,12 +25,14 @@ LOGGER = logging.getLogger('device-manager.' + __name__)
 LOGGER.addHandler(logging.StreamHandler())
 LOGGER.setLevel(logging.INFO)
 
+
 def serialize_full_device(orm_device):
     data = device_schema.dump(orm_device).data
     data['attrs'] = {}
     for template in orm_device.templates:
         data['attrs'][template.id] = attr_list_schema.dump(template.attrs).data
     return data
+
 
 def auto_create_template(json_payload, new_device):
     if ('attrs' in json_payload) and (new_device.templates is None):
@@ -39,10 +41,12 @@ def auto_create_template(json_payload, new_device):
         new_device.templates = [device_template]
         load_attrs(json_payload['attrs'], device_template, DeviceAttr, db)
 
+
 def parse_template_list(template_list, new_device):
     new_device.templates = []
     for templateid in template_list:
         new_device.templates.append(assert_template_exists(templateid))
+
 
 def generate_device_id():
     # TODO this is awful, makes me sad, but for now also makes demoing easier
@@ -57,6 +61,7 @@ def generate_device_id():
             return new_id
 
     raise HTTPRequestError(500, "Failed to generate unique device_id")
+
 
 @device.route('/device', methods=['GET'])
 def get_devices():
@@ -89,17 +94,69 @@ def get_devices():
         else:
             return format_response(e.error_code, e.message)
 
+
 @device.route('/device', methods=['POST'])
 def create_device():
     """ Creates and configures the given device (in json) """
     try:
         tenant = init_tenant_context(request, db)
-        device_data, json_payload = parse_payload(request, device_schema)
-        device_data['id'] = generate_device_id()
-        device_data.pop('templates') # handled separatly by parse_template_list
-        orm_device = Device(**device_data)
-        parse_template_list(json_payload['templates'], orm_device)
-        auto_create_template(json_payload, orm_device)
+        try:
+            count = int(request.args.get('count', '1'))
+            clength = len(str(count))
+            verbose = request.args.get('verbose', 'false') in ['true', '1', 'True']
+            if verbose and count != 1:
+                raise HTTPRequestError(400, "Verbose can only be used for single device creation")
+        except ValueError as e:
+            LOGGER.error(e)
+            raise HTTPRequestError(400, "If provided, count must be integer")
+
+        devices = []
+
+        # Handlers
+        ctx_broker_handler = OrionHandler(service=tenant)
+        kafka_handler = KafkaHandler()
+        subs_handler = PersistenceHandler(service=tenant)
+
+        for i in range(0, count):
+            device_data, json_payload = parse_payload(request, device_schema)
+            device_data['id'] = generate_device_id()
+            device_data['label'] = device_data['label'] + "_%0*d" % (clength, i)
+            device_data.pop('templates', None)  # handled separately by parse_template_list
+            orm_device = Device(**device_data)
+            parse_template_list(json_payload.get('templates', []), orm_device)
+            auto_create_template(json_payload, orm_device)
+            db.session.add(orm_device)
+
+            devices.append({'id': device_data['id'], 'label': device_data['label']})
+
+            full_device = serialize_full_device(orm_device)
+
+            # TODO remove this in favor of kafka as data broker....
+            # Updating handlers
+            ctx_broker_handler.create(full_device)
+            kafka_handler.create(full_device, meta={"service": tenant})
+            # Generating 'device type' field for history
+            type_descr = "template"
+            for dev_type in full_device['attrs'].keys():
+                type_descr += "_" + str(dev_type)
+            subid = subs_handler.create(full_device['id'], type_descr)
+            orm_device.persistence = subid
+
+        try:
+            db.session.commit()
+        except IntegrityError as error:
+            handle_consistency_exception(error)
+
+        if verbose:
+            result = json.dumps({
+                'message': 'device created',
+                'device': full_device
+            })
+        else:
+            result = json.dumps({
+                'message': 'devices created',
+                'devices': devices
+            })
 
         # TODO revisit iotagent notification procedure
         # protocol_handler = IotaHandler(service=tenant)
@@ -107,30 +164,6 @@ def create_device():
         # if orm_device.protocol != "virtual":
         #     device_type = "device"
         #     protocol_handler.create(orm_device)
-        # TODO revisit history management
-        # subscription_handler = PersistenceHandler(service=tenant)
-        # orm_device.persistence = subscription_handler.create(orm_device.device_id, "device")
-
-        db.session.add(orm_device)
-
-        try:
-            db.session.commit()
-        except IntegrityError as error:
-            handle_consistency_exception(error)
-
-        full_device = serialize_full_device(orm_device)
-
-        result = json.dumps({
-            'message': 'device created',
-            'device': full_device
-        })
-
-        # TODO remove this in favor of kafka as data broker....
-        ctx_broker_handler = OrionHandler(service=tenant)
-        ctx_broker_handler.create(full_device)
-        kafka_handler = KafkaHandler()
-        kafka_handler.create(full_device, meta = { "service" : tenant})
-
 
         return make_response(result, 200)
 
@@ -139,6 +172,7 @@ def create_device():
             return make_response(json.dumps(e.message), e.error_code)
         else:
             return format_response(e.error_code, e.message)
+
 
 @device.route('/device/<deviceid>', methods=['GET'])
 def get_device(deviceid):
@@ -152,12 +186,17 @@ def get_device(deviceid):
         else:
             return format_response(e.error_code, e.message)
 
+
 @device.route('/device/<deviceid>', methods=['DELETE'])
 def remove_device(deviceid):
     try:
-        init_tenant_context(request, db)
+        tenant = init_tenant_context(request, db)
         orm_device = assert_device_exists(deviceid)
         data = serialize_full_device(orm_device)
+
+        subscription_handler = PersistenceHandler(service=tenant)
+        subscription_handler.remove(orm_device.persistence)
+
         db.session.delete(orm_device)
         db.session.commit()
 
@@ -169,6 +208,7 @@ def remove_device(deviceid):
         else:
             return format_response(e.error_code, e.message)
 
+
 @device.route('/device/<deviceid>', methods=['PUT'])
 def update_device(deviceid):
     try:
@@ -178,7 +218,7 @@ def update_device(deviceid):
         device_data, json_payload = parse_payload(request, device_schema)
         device_data.pop('templates')
         updated_device = Device(**device_data)
-        parse_template_list(json_payload['templates'], updated_device)
+        parse_template_list(json_payload.get('templates', []), updated_device)
         updated_device.id = deviceid
 
         # update sanity check
@@ -202,13 +242,20 @@ def update_device(deviceid):
         #         protocolHandler.remove(updated_device.id)
 
         # TODO revisit device data persistence
-        # subsHandler = PersistenceHandler(service=tenant)
-        # subsHandler.remove(old_device.persistence)
-        # updated_device.persistence = subsHandler.create(deviceid, device_type)
+        subsHandler = PersistenceHandler(service=tenant)
+        subsHandler.remove(old_device.persistence)
+        # Generating 'device type' field for history
+        type_descr = "template"
+        for dev_type in full_device['attrs'].keys():
+            type_descr += "_" + str(dev_type)
+        updated_device.persistence = subsHandler.create(deviceid, type_descr)
 
         # TODO remove this in favor of kafka as data broker....
         ctx_broker_handler = OrionHandler(service=tenant)
         ctx_broker_handler.update(serialize_full_device(old_device))
+
+        kafka_handler = KafkaHandler()
+        kafka_handler.update(full_device, meta={"service": tenant})
 
         db.session.delete(old_device)
         db.session.add(updated_device)
@@ -226,6 +273,7 @@ def update_device(deviceid):
             return make_response(json.dumps(e.message), e.error_code)
         else:
             return format_response(e.error_code, e.message)
+
 
 @device.route('/device/<deviceid>/attrs', methods=['PUT'])
 def configure_device(deviceid):
@@ -252,6 +300,7 @@ def configure_device(deviceid):
             return format_response(e.error_code, e.message)
 
 
+# Convenience template ops
 @device.route('/device/<deviceid>/template/<templateid>', methods=['POST'])
 def add_template_to_device(deviceid, templateid):
     """ associates given template with device """
@@ -297,5 +346,39 @@ def remove_template_from_device(deviceid, templateid):
             return make_response(json.dumps(e.message), e.error_code)
         else:
             return format_response(e.error_code, e.message)
+
+
+@device.route('/device/template/<templateid>', methods=['GET'])
+def get_by_template(templateid):
+    try:
+        init_tenant_context(request, db)
+
+        page_number, per_page = get_pagination(request)
+        page = (
+            db.session.query(Device)
+            .join(DeviceTemplateMap)
+            .filter_by(template_id=templateid)
+            .paginate(page=page_number, per_page=per_page, error_out=False)
+        )
+        devices = []
+        for d in page.items:
+            devices.append(serialize_full_device(d))
+
+        result = json.dumps({
+            'pagination': {
+                'page': page.page,
+                'total': page.pages,
+                'has_next': page.has_next,
+                'next_page': page.next_num
+            },
+            'devices': devices
+        })
+        return make_response(result, 200)
+    except HTTPRequestError as e:
+        if isinstance(e.message, dict):
+            return make_response(json.dumps(e.message), e.error_code)
+        else:
+            return format_response(e.error_code, e.message)
+
 
 app.register_blueprint(device)

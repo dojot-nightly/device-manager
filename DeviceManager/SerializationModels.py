@@ -1,7 +1,8 @@
 # object to json sweetness
 import json
-from marshmallow import Schema, fields, ValidationError, post_dump
+from marshmallow import Schema, fields, post_dump
 from utils import HTTPRequestError
+
 
 class AttrSchema(Schema):
     id = fields.Int()
@@ -17,8 +18,10 @@ class AttrSchema(Schema):
     def remove_null_values(self, data):
         return {key: value for key, value in data.items() if value is not None}
 
+
 attr_schema = AttrSchema()
 attr_list_schema = AttrSchema(many=True)
+
 
 class TemplateSchema(Schema):
     id = fields.Int()
@@ -26,13 +29,17 @@ class TemplateSchema(Schema):
     created = fields.DateTime(dump_only=True)
     updated = fields.DateTime(dump_only=True)
     attrs = fields.Nested(AttrSchema, many=True, dump_only=True)
+    data_attrs = fields.Nested(AttrSchema, many=True, dump_only=True)
+    config_attrs = fields.Nested(AttrSchema, many=True, dump_only=True)
 
     @post_dump
     def remove_null_values(self, data):
         return {key: value for key, value in data.items() if value is not None}
 
+
 template_schema = TemplateSchema()
 template_list_schema = TemplateSchema(many=True)
+
 
 class DeviceSchema(Schema):
     id = fields.String(dump_only=True)
@@ -48,8 +55,10 @@ class DeviceSchema(Schema):
     def remove_null_values(self, data):
         return {key: value for key, value in data.items() if value is not None}
 
+
 device_schema = DeviceSchema()
 device_list_schema = DeviceSchema(many=True)
+
 
 def parse_payload(request, schema):
     try:
@@ -65,6 +74,7 @@ def parse_payload(request, schema):
         results = {'message':'failed to parse input', 'errors': errors}
         raise HTTPRequestError(400, results)
     return data, json_payload
+
 
 def load_attrs(attr_list, parent_template, base_type, db):
     for attr in attr_list:
