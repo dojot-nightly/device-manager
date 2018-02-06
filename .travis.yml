@@ -1,16 +1,13 @@
 language: python
 
-before_script:
-  - npm install -g aglio
+services:
+  - docker
+
+python:
+    - "3.6"
 
 script:
-  - aglio -i docs/apiary.apib -o docs/apis.html
+ - docker build -t ${TRAVIS_REPO_SLUG} .
 
-deploy:
-  local_dir: docs
-  target_branch: gh-pages
-  provider: pages
-  skip_cleanup: true
-  github_token: $GITHUB_TOKEN
-  on:
-    branch: master
+after_success:
+  - travis/publish.sh

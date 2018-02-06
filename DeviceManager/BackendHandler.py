@@ -82,11 +82,13 @@ class OrionHandler(BackendHandler):
         for tpl in device['attrs']:
             for attr in device['attrs'][tpl]:
                 body[attr['label']] = {"type": attr['value_type']}
+                if (attr['value_type'] == 'geo:point'):
+                    body[attr['label']]['value'] = '0,0'
 
         return body
 
-    def create_update_device(self, device, is_update=True):
-        target_url = "%s/%s/attrs?type=device" % (self.baseUrl, device['id'])
+    def create_update_device(self, device, type_descr, is_update=True):
+        target_url = "%s/%s/attrs?type=%s&options=keyValues" % (self.baseUrl, device['id'], type_descr)
         body = json.dumps(OrionHandler.parse_device(device, not is_update))
         if not is_update:
             target_url = self.baseUrl
@@ -106,16 +108,16 @@ class OrionHandler(BackendHandler):
         except requests.ConnectionError:
             raise HTTPRequestError(500, "Broker is not reachable")
 
-    def create(self, device):
-        self.create_update_device(device, False)
+    def create(self, device, type_descr):
+        self.create_update_device(device, type_descr, False)
 
     def remove(self, device_id):
         # removal is ignored, thus leaving removed device data lingering in the system
         # (this allows easier recovery/rollback of data by the user)
         pass
 
-    def update(self, device):
-        self.create_update_device(device)
+    def update(self, device, type_descr):
+        self.create_update_device(device, type_descr)
 
 
 class KafkaHandler:

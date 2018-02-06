@@ -10,6 +10,7 @@ from flask import request
 from flask import make_response
 from flask import Blueprint
 from utils import *
+from conf import CONFIG
 from BackendHandler import OrionHandler, KafkaHandler, PersistenceHandler
 from sqlalchemy.exc import IntegrityError
 
@@ -27,10 +28,10 @@ LOGGER.setLevel(logging.INFO)
 
 
 def serialize_full_device(orm_device):
-    data = device_schema.dump(orm_device).data
+    data = device_schema.dump(orm_device)
     data['attrs'] = {}
     for template in orm_device.templates:
-        data['attrs'][template.id] = attr_list_schema.dump(template.attrs).data
+        data['attrs'][template.id] = attr_list_schema.dump(template.attrs)
     return data
 
 
@@ -110,18 +111,28 @@ def create_device():
             LOGGER.error(e)
             raise HTTPRequestError(400, "If provided, count must be integer")
 
+
+        def indexed_label(base, index):
+            if count == 1:
+                return base
+            else:
+                return "{}_{:0{width}d}".format(base, index, width=clength)
+
         devices = []
 
         # Handlers
-        ctx_broker_handler = OrionHandler(service=tenant)
+        if CONFIG.orion:
+            ctx_broker_handler = OrionHandler(service=tenant)
+            subs_handler = PersistenceHandler(service=tenant)
+
         kafka_handler = KafkaHandler()
-        subs_handler = PersistenceHandler(service=tenant)
 
         for i in range(0, count):
             device_data, json_payload = parse_payload(request, device_schema)
             device_data['id'] = generate_device_id()
-            device_data['label'] = device_data['label'] + "_%0*d" % (clength, i)
-            device_data.pop('templates', None)  # handled separately by parse_template_list
+            device_data['label'] = indexed_label(device_data['label'], i)
+            # handled separately by parse_template_list
+            device_data.pop('templates', None)
             orm_device = Device(**device_data)
             parse_template_list(json_payload.get('templates', []), orm_device)
             auto_create_template(json_payload, orm_device)
@@ -131,16 +142,17 @@ def create_device():
 
             full_device = serialize_full_device(orm_device)
 
-            # TODO remove this in favor of kafka as data broker....
             # Updating handlers
-            ctx_broker_handler.create(full_device)
             kafka_handler.create(full_device, meta={"service": tenant})
-            # Generating 'device type' field for history
-            type_descr = "template"
-            for dev_type in full_device['attrs'].keys():
-                type_descr += "_" + str(dev_type)
-            subid = subs_handler.create(full_device['id'], type_descr)
-            orm_device.persistence = subid
+            if CONFIG.orion:
+                # TODO remove this in favor of kafka as data broker....
+                ctx_broker_handler.create(full_device)
+                # Generating 'device type' field for history
+                type_descr = "template"
+                for dev_type in full_device['attrs'].keys():
+                    type_descr += "_" + str(dev_type)
+                subid = subs_handler.create(full_device['id'], type_descr)
+                orm_device.persistence = subid
 
         try:
             db.session.commit()
@@ -194,8 +206,9 @@ def remove_device(deviceid):
         orm_device = assert_device_exists(deviceid)
         data = serialize_full_device(orm_device)
 
-        subscription_handler = PersistenceHandler(service=tenant)
-        subscription_handler.remove(orm_device.persistence)
+        if CONFIG.orion:
+            subscription_handler = PersistenceHandler(service=tenant)
+            subscription_handler.remove(orm_device.persistence)
 
         db.session.delete(orm_device)
         db.session.commit()
@@ -212,60 +225,51 @@ def remove_device(deviceid):
 @device.route('/device/<deviceid>', methods=['PUT'])
 def update_device(deviceid):
     try:
-        tenant = init_tenant_context(request, db)
-        old_device = assert_device_exists(deviceid)
-
         device_data, json_payload = parse_payload(request, device_schema)
-        device_data.pop('templates')
-        updated_device = Device(**device_data)
-        parse_template_list(json_payload.get('templates', []), updated_device)
-        updated_device.id = deviceid
 
         # update sanity check
         if 'attrs' in json_payload:
             error = "Attributes cannot be updated inline. Update the associated template instead."
             return format_response(400, error)
 
-        # TODO revisit iotagent notification mechanism
-        # protocolHandler = IotaHandler(service=tenant)
-        # device_type = 'virtual'
-        # old_type = old_device.protocol
-        # new_type = updated_device.protocol
-        # if (old_type != 'virtual') and (new_type != 'virtual'):
-        #     device_type = 'device'
-        #     protocolHandler.update(updated_device)
-        # if old_type != new_type:
-        #     if old_type == 'virtual':
-        #         device_type = 'device'
-        #         protocolHandler.create(updated_device)
-        #     elif new_type == 'virtual':
-        #         protocolHandler.remove(updated_device.id)
+        tenant = init_tenant_context(request, db)
+        old_orm_device = assert_device_exists(deviceid)
 
-        # TODO revisit device data persistence
-        subsHandler = PersistenceHandler(service=tenant)
-        subsHandler.remove(old_device.persistence)
-        # Generating 'device type' field for history
-        type_descr = "template"
-        for dev_type in full_device['attrs'].keys():
-            type_descr += "_" + str(dev_type)
-        updated_device.persistence = subsHandler.create(deviceid, type_descr)
+        # handled separately by parse_template_list
+        device_data.pop('templates')
+        updated_orm_device = Device(**device_data)
+        parse_template_list(json_payload.get('templates', []), updated_orm_device)
+        updated_orm_device.id = deviceid
 
-        # TODO remove this in favor of kafka as data broker....
-        ctx_broker_handler = OrionHandler(service=tenant)
-        ctx_broker_handler.update(serialize_full_device(old_device))
+        # full_old_device = serialize_full_device(old_orm_device)
+        full_device = serialize_full_device(updated_orm_device)
+
+        if CONFIG.orion:
+            # TODO revisit device data persistence
+            subsHandler = PersistenceHandler(service=tenant)
+            subsHandler.remove(old_device.persistence)
+            # Generating 'device type' field for history
+            type_descr = "template"
+            for dev_type in full_device['attrs'].keys():
+                type_descr += "_" + str(dev_type)
+            updated_device.persistence = subsHandler.create(deviceid, type_descr)
+
+            # TODO remove this in favor of kafka as data broker....
+            ctx_broker_handler = OrionHandler(service=tenant)
+            ctx_broker_handler.update(serialize_full_device(old_device))
 
         kafka_handler = KafkaHandler()
         kafka_handler.update(full_device, meta={"service": tenant})
 
-        db.session.delete(old_device)
-        db.session.add(updated_device)
+        db.session.delete(old_orm_device)
+        db.session.add(updated_orm_device)
 
         try:
             db.session.commit()
         except IntegrityError as error:
             handle_consistency_exception(error)
 
-        result = {'message': 'device updated', 'device': serialize_full_device(updated_device)}
+        result = {'message': 'device updated', 'device': serialize_full_device(updated_orm_device)}
         return make_response(json.dumps(result))
 
     except HTTPRequestError as e:
@@ -275,29 +279,68 @@ def update_device(deviceid):
             return format_response(e.error_code, e.message)
 
 
-@device.route('/device/<deviceid>/attrs', methods=['PUT'])
+def find_attribute(orm_device, attr_name, attr_type):
+    """
+    Find a particular attribute in a device retrieved from database.
+    Return the attribute, if found, 'None' otherwise
+    """
+    for template_id in orm_device['attrs']:
+        for attr in orm_device['attrs'][template_id]:
+            if (attr['label'] == attr_name) and (attr['type'] == attr_type):
+                return attr
+    return None
+
+@device.route('/device/<deviceid>/actuate', methods=['PUT'])
 def configure_device(deviceid):
+    """
+    Send actuation commands to the device
+    """
     try:
-        tenant = init_tenant_context(request, db)
-        # In fact, the actual device is not needed. We must be sure that it exists.
-        assert_device_exists(deviceid)
-        json_payload = json.loads(request.data)
+        LOGGER.info('Received request for /device/<id>/actuate.')
+        LOGGER.info('Device ID is: %s', deviceid)
+
+        # Meta information to be published along with device actuation message
+        meta = {
+            'service': ''
+        }
         kafka_handler = KafkaHandler()
-        # Remove topic metadata from JSON to be sent to the device
-        # Should this be moved to a HTTP header?
-        topic = json_payload["topic"]
-        del json_payload["topic"]
+        invalid_attrs = []
+        payload = {}
 
-        kafka_handler.configure(json_payload, meta = { "service" : tenant, "id" : deviceid, "topic": topic})
+        meta['service'] = init_tenant_context(request, db)
 
-        result = {'message': 'configuration sent'}
-        return make_response(result, 200)
+        orm_device = assert_device_exists(deviceid)
+        full_device = serialize_full_device(orm_device)
+        LOGGER.debug('Full device: %s', json.dumps(full_device))
 
-    except HTTPRequestError as e:
-        if isinstance(e.message, dict):
-            return make_response(json.dumps(e.message), e.error_code)
+        payload = json.loads(request.data)
+        LOGGER.debug('Parsed request payload: %s', json.dumps(payload))
+
+        payload['id'] = orm_device.id
+
+        for attr in payload['attrs']:
+            if find_attribute(full_device, attr, 'actuator') is None:
+                invalid_attrs.append(attr)
+
+        if not invalid_attrs:
+            LOGGER.info('Sending configuration message through Kafka.')
+            kafka_handler.configure(payload, meta)
+            LOGGER.info('Configuration sent.')
+            result = {'status': 'configuration sent to device'}
         else:
-            return format_response(e.error_code, e.message)
+            result = {
+                'status': 'some of the attributes are not configurable',
+                'attrs': invalid_attrs
+            }
+
+        LOGGER.info('Configuration sent.')
+        return make_response(json.dumps(result), 200)
+
+    except HTTPRequestError as error:
+        if isinstance(error.message, dict):
+            return make_response(json.dumps(error.message), error.error_code)
+        else:
+            return format_response(error.error_code, error.message)
 
 
 # Convenience template ops

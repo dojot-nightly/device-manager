@@ -10,6 +10,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = CONFIG.get_db_url()
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
+
 class DeviceAttr(db.Model):
     __tablename__ = 'attrs'
 
@@ -25,9 +26,15 @@ class DeviceAttr(db.Model):
     template_id = db.Column(db.Integer, db.ForeignKey('templates.id'), nullable=False)
     template = db.relationship("DeviceTemplate", back_populates="attrs")
 
+    # Any given template must not possess two attributes with the same type, label
+    __table_args__ = (
+        sqlalchemy.UniqueConstraint('template_id', 'type', 'label'),
+    )
+
     def __repr__(self):
         return "<Attr(label='%s', type='%s', value_type='%s')>" % (
             self.label, self.type, self.value_type)
+
 
 class DeviceTemplate(db.Model):
     __tablename__ = 'templates'
@@ -38,7 +45,8 @@ class DeviceTemplate(db.Model):
     updated = db.Column(db.DateTime, onupdate=datetime.now)
 
     attrs = db.relationship("DeviceAttr", back_populates="template", lazy='joined', cascade="delete")
-    devices = db.relationship("Device", secondary='device_template', back_populates="templates")
+    devices = db.relationship("Device", secondary='device_template',
+                              back_populates="templates", passive_deletes='all')
 
     config_attrs = db.relationship('DeviceAttr',
                              primaryjoin=db.and_(DeviceAttr.template_id == id,
@@ -50,6 +58,7 @@ class DeviceTemplate(db.Model):
 
     def __repr__(self):
         return "<Template(label='%s')>" % self.label
+
 
 class Device(db.Model):
     __tablename__ = 'devices'
@@ -70,11 +79,17 @@ class Device(db.Model):
 
 class DeviceTemplateMap(db.Model):
     __tablename__ = 'device_template'
-    device_id = db.Column(db.String(4), db.ForeignKey('devices.id'), primary_key=True, index=True)
-    template_id = db.Column(db.Integer, db.ForeignKey('templates.id'), primary_key=True, index=True)
+    device_id = db.Column(db.String(4), db.ForeignKey('devices.id'),
+                          primary_key=True, index=True)
+    template_id = db.Column(db.Integer, db.ForeignKey('templates.id'),
+                            primary_key=True, index=True, nullable=False)
 
 
 def assert_device_exists(device_id):
+    """
+    Assert that a device exists, returning the object retrieved from the
+    database.
+    """
     try:
         return Device.query.filter_by(id=device_id).one()
     except sqlalchemy.orm.exc.NoResultFound:
