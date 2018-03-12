@@ -1,8 +1,12 @@
 from __future__ import absolute_import
 import dredd_hooks as hooks
 import json
-from DeviceHandler import DeviceHandler
-from TemplateHandler import TemplateHandler
+
+# This shouldn't be needed
+from werkzeug.datastructures import MultiDict
+
+from DeviceManager.DeviceHandler import DeviceHandler
+from DeviceManager.TemplateHandler import TemplateHandler
 from token_generator import generate_token
 
 
@@ -71,10 +75,14 @@ def register_new_device(transaction):
     transaction['request']['body'] = json.dumps(device_json)
 
 
-
+@hooks.before('Devices > Device info > Get the current list of devices > Example 2')
+def update_onlyids_query(transaction):
+    transaction['request']['uri'] = transaction['request']['uri'].replace('idsOnly=false',
+                                                                          'idsOnly=true')
+    transaction['fullPath'] = transaction['fullPath'].replace('idsOnly=false', 'idsOnly=true')
 
 @hooks.before('Devices > Device info > Get device info')
-@hooks.before('Devices > Device info > Get the current list of devices')
+@hooks.before('Devices > Device info > Get the current list of devices > Example 1')
 @hooks.before('Devices > Device info > Get the current list of devices associated with given template')
 @hooks.before('Devices > Device info > Update device info')
 @hooks.before('Devices > Device info > Configure device')
@@ -150,7 +158,7 @@ def update_expected_ids_single_device_delete(transaction):
 
 
 @hooks.before('Devices > Device info > Get the current list of devices associated with given template')
-@hooks.before('Devices > Device info > Get the current list of devices')
+@hooks.before('Devices > Device info > Get the current list of devices > Example 1')
 def update_expected_ids_multiple_devices(transaction):
     global template_id, device_id
     expected_body = json.loads(transaction['expected']['body'])
@@ -174,15 +182,18 @@ def update_template_id(transaction):
 
 @hooks.after_each
 def clean_scenario(transaction):
+    # This shouldn't be needed - controller class shouln't expose flask dependent params
+    # TODO remove
+    args = MultiDict([
+        ('page_size', 10),
+        ('page_num', 1),
+        ('attr_format', 'both')
+    ])
     req = {
         'headers': {
             'authorization': generate_token()
         },
-        'args': {
-            'page_size': 10,
-            'page_num': 1,
-            'attr_format': 'both'
-        },
+        'args': args,
         'body': ''
     }
 
