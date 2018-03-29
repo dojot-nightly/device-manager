@@ -11,6 +11,19 @@ app.config['SQLALCHEMY_DATABASE_URI'] = CONFIG.get_db_url()
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
+class DeviceOverride(db.Model):
+    __tablename__ = 'overrides'
+
+    id = db.Column(db.Integer, db.Sequence('override_id'), primary_key=True)
+
+    did = db.Column(db.String(8), db.ForeignKey('devices.id'))
+    aid = db.Column(db.Integer, db.ForeignKey('attrs.id'))
+
+    device = db.relationship('Device', back_populates='overrides')
+    attr = db.relationship('DeviceAttr', back_populates='overrides')
+
+    static_value = db.Column(db.String(128))
+
 class DeviceAttr(db.Model):
     __tablename__ = 'attrs'
 
@@ -27,8 +40,11 @@ class DeviceAttr(db.Model):
     template = db.relationship("DeviceTemplate", back_populates="attrs")
 
     parent_id = db.Column(db.Integer, db.ForeignKey('attrs.id'))
-    parent = db.relationship("DeviceAttr", remote_side=[id])
+    parent = db.relationship("DeviceAttr", remote_side=[id], back_populates="children")
     children = db.relationship("DeviceAttr", back_populates="parent", cascade="delete")
+
+    # remove known overrides if this attribute is removed
+    overrides = db.relationship('DeviceOverride', cascade="delete")
 
     # Any given template must not possess two attributes with the same type, label
     __table_args__ = (
@@ -38,8 +54,8 @@ class DeviceAttr(db.Model):
     )
 
     def __repr__(self):
-        return "<Attr(label='%s', type='%s', value_type='%s')>" % (
-            self.label, self.type, self.value_type)
+        return "<Attr(label='{}', type='{}', value_type='{}', children='{}', parent={})>".format(
+            self.label, self.type, self.value_type, self.children, self.parent)
 
 
 class DeviceTemplate(db.Model):
@@ -63,19 +79,20 @@ class DeviceTemplate(db.Model):
                                                      DeviceAttr.type.in_(('static', 'dynamic'))))
 
     def __repr__(self):
-        return "<Template(label='%s')>" % self.label
+        return "<Template(label={}, attrs={})>".format(self.label, self.attrs)
 
 
 class Device(db.Model):
     __tablename__ = 'devices'
 
-    id = db.Column(db.String(4), unique=True, nullable=False, primary_key=True)
+    id = db.Column(db.String(8), unique=True, nullable=False, primary_key=True)
     label = db.Column(db.String(128), nullable=False)
     created = db.Column(db.DateTime, default=datetime.now)
     updated = db.Column(db.DateTime, onupdate=datetime.now)
 
     # template_id = db.Column(db.Integer, db.ForeignKey('templates.id'), nullable=False)
     templates = db.relationship("DeviceTemplate", secondary='device_template', back_populates="devices")
+    overrides = db.relationship("DeviceOverride", back_populates="device", cascade="delete")
 
     persistence = db.Column(db.String(128))
 
@@ -85,7 +102,7 @@ class Device(db.Model):
 
 class DeviceTemplateMap(db.Model):
     __tablename__ = 'device_template'
-    device_id = db.Column(db.String(4), db.ForeignKey('devices.id'),
+    device_id = db.Column(db.String(8), db.ForeignKey('devices.id'),
                           primary_key=True, index=True)
     template_id = db.Column(db.Integer, db.ForeignKey('templates.id'),
                             primary_key=True, index=True, nullable=False)
