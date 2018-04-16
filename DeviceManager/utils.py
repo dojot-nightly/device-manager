@@ -2,19 +2,25 @@
 import base64
 import json
 import random
-from flask import make_response
+from flask import make_response, jsonify
+from Crypto.Cipher import AES
 
+from DeviceManager.conf import CONFIG
+
+BS = AES.block_size
+pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS)
+unpad = lambda s : s[:-ord(s[len(s)-1:])]
 
 def format_response(status, message=None):
     """ Utility helper to generate default status responses """
     if message:
-        payload = json.dumps({'message': message, 'status': status})
+        payload = {'message': message, 'status': status}
     elif 200 <= status < 300:
-        payload = json.dumps({'message': 'ok', 'status': status})
+        payload = {'message': 'ok', 'status': status}
     else:
-        payload = json.dumps({'message': 'Request failed', 'status': status})
+        payload = {'message': 'Request failed', 'status': status}
 
-    return make_response(payload, status)
+    return make_response(jsonify(payload), status)
 
 def create_id():
     """ Generates a random hex id for managed entities """
@@ -55,3 +61,28 @@ def decode_base64(data):
     if missing_padding != 0:
         data += '=' * (4 - missing_padding)
     return base64.decodebytes(data.encode()).decode()
+
+def encrypt(plain_text):
+    # plain_text is padded so its length is multiple of cipher block size
+    plain_text_pad = pad(plain_text)
+
+    cipher = AES.new(CONFIG.crypto['key'], AES.MODE_CBC, CONFIG.crypto['iv'])
+    encrypted = cipher.encrypt(plain_text_pad)
+
+    return encrypted
+
+def decrypt(encrypted):
+
+    cipher = AES.new(CONFIG.crypto['key'], AES.MODE_CBC, CONFIG.crypto['iv'])
+    plain_text_pad = cipher.decrypt(encrypted)
+    plain_text = unpad(plain_text_pad)
+
+    return plain_text
+
+def retrieve_auth_token(request):
+    token = None
+    try:
+        token = request.headers['authorization']
+    except KeyError:
+        raise HTTPRequestError(401, "No authorization token has been supplied")
+    return token
