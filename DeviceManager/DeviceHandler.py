@@ -17,7 +17,8 @@ from DeviceManager.utils import HTTPRequestError
 from DeviceManager.conf import CONFIG
 from DeviceManager.BackendHandler import OrionHandler, KafkaHandler, PersistenceHandler
 
-from DeviceManager.DatabaseModels import db, assert_device_exists, assert_template_exists
+from DeviceManager.DatabaseHandler import db
+from DeviceManager.DatabaseModels import assert_device_exists, assert_template_exists
 from DeviceManager.DatabaseModels import handle_consistency_exception, assert_device_relation_exists
 from DeviceManager.DatabaseModels import DeviceTemplate, DeviceAttr, Device, DeviceTemplateMap, DeviceAttrsPsk
 from DeviceManager.DatabaseModels import DeviceOverride
@@ -34,14 +35,16 @@ LOGGER = logging.getLogger('device-manager.' + __name__)
 LOGGER.addHandler(logging.StreamHandler())
 LOGGER.setLevel(logging.INFO)
 
-def serialize_full_device(orm_device, tenant, sensitive_data=False):
+def serialize_full_device(orm_device, tenant, sensitive_data=False, status_cache=None):
     data = device_schema.dump(orm_device)
-    status = StatusMonitor.get_status(tenant, orm_device.id)
-    if status is not None:
-        data['status'] = status
     data['attrs'] = {}
     for template in orm_device.templates:
         data['attrs'][template.id] = attr_list_schema.dump(template.attrs)
+
+    if status_cache is None:
+        status_cache = StatusMonitor.get_status(tenant, orm_device.id)
+
+    data['status'] = status_cache.get(orm_device.id, 'offline')
 
     for override in orm_device.overrides:
         for attr in data['attrs'][override.attr.template_id]:
@@ -55,6 +58,7 @@ def serialize_full_device(orm_device, tenant, sensitive_data=False):
                     if attr['id'] == psk_data.attr_id:
                         dec = decrypt(psk_data.psk)
                         attr['static_value'] = dec.decode('ascii')
+
     return data
 
 def find_template(template_list, id):
@@ -203,10 +207,11 @@ class DeviceHandler(object):
         else:
             page = db.session.query(Device).paginate(**pagination)
 
+        status_info = StatusMonitor.get_status(tenant)
 
         devices = []
         for d in page.items:
-            devices.append(serialize_full_device(d, tenant, sensitive_data))
+            devices.append(serialize_full_device(d, tenant, sensitive_data, status_info))
 
         result = {
             'pagination': {
@@ -613,7 +618,7 @@ class DeviceHandler(object):
         # todo remove this magic number
         if key_length > 1024 or key_length <= 0:
             raise HTTPRequestError(400, "key_length must be greater than 0 and lesser than {}".format(1024))
-        
+
         is_all_psk_attr_valid = False
         target_attrs_data = []
 
@@ -629,7 +634,7 @@ class DeviceHandler(object):
             if not is_all_psk_attr_valid:
                 raise HTTPRequestError(400, "Not found some attributes, "
                     "please check them")
-                    
+
             if len(target_attributes) != len(target_attrs_data):
                 if not is_all_psk_attr_valid:
                     raise HTTPRequestError(400,
@@ -665,7 +670,7 @@ class DeviceHandler(object):
                 psk_entry.psk = encrypted_psk
 
             result.append( {'attribute': attr["label"], 'psk': psk_hex} )
-        
+
         device_orm.updated = datetime.now()
         db.session.commit()
 

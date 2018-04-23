@@ -1,16 +1,12 @@
 from datetime import datetime
 import re
 import sqlalchemy
-from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import event
 
-from DeviceManager.app import app
-from DeviceManager.utils import HTTPRequestError
-from DeviceManager.conf import CONFIG
-
-app.config['SQLALCHEMY_DATABASE_URI'] = CONFIG.get_db_url()
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
+from .app import app
+from .utils import HTTPRequestError
+from .conf import CONFIG
+from .DatabaseHandler import db
 
 class DeviceOverride(db.Model):
     __tablename__ = 'overrides'
@@ -76,15 +72,16 @@ class DeviceTemplate(db.Model):
                             back_populates="template",
                             lazy='joined',
                             cascade="delete")
+
     devices = db.relationship("Device",
                               secondary='device_template',
                               back_populates="templates",
                               passive_deletes='all')
 
     config_attrs = db.relationship('DeviceAttr',
-                             primaryjoin=db.and_(DeviceAttr.template_id == id,
-                                                 DeviceAttr.type != 'static',
-                                                 DeviceAttr.type != 'dynamic'))
+                                   primaryjoin=db.and_(DeviceAttr.template_id == id,
+                                                       DeviceAttr.type != 'static',
+                                                       DeviceAttr.type != 'dynamic'))
     data_attrs = db.relationship('DeviceAttr',
                                  primaryjoin=db.and_(DeviceAttr.template_id == id,
                                                      DeviceAttr.type.in_(('static', 'dynamic'))))
@@ -101,12 +98,20 @@ class Device(db.Model):
     created = db.Column(db.DateTime, default=datetime.now)
     updated = db.Column(db.DateTime, onupdate=datetime.now)
 
-    templates = db.relationship("DeviceTemplate", secondary='device_template', back_populates="devices")
-    overrides = db.relationship("DeviceOverride", back_populates="device", cascade="delete")
+    templates = db.relationship("DeviceTemplate",
+                                secondary='device_template',
+                                back_populates="devices",
+                                lazy='joined')
+
+    overrides = db.relationship("DeviceOverride",
+                                back_populates="device",
+                                cascade="delete",
+                                lazy='joined')
 
     pre_shared_keys = db.relationship('DeviceAttrsPsk',
                                       cascade='delete',
-                                      back_populates="devices")
+                                      back_populates="devices",
+                                      lazy='joined')
 
     persistence = db.Column(db.String(128))
 
