@@ -81,7 +81,11 @@ def auto_create_template(json_payload, new_device):
             if orm_template is None:
                 raise HTTPRequestError(400, 'Unknown template "{}" in attr list'.format(orm_template))
 
-            target = int(attr['id'])
+            try:
+                target = int(attr['id'])
+            except ValueError:
+                raise HTTPRequestError(400, "Unkown attribute \"{}\" in override list".format(attr['id']))
+
             found = False
             for orm_attr in orm_template.attrs:
                 if target == orm_attr.id:
@@ -195,13 +199,13 @@ class DeviceHandler(object):
 
         target_label = req.args.get('label', None)
         if target_label:
-            parsed_query.append("devices.label = '{}'".format(target_label))
+            parsed_query.append("devices.label like '%{}%'".format(target_label))
 
-        if len(parsed_query):
+        if parsed_query:
             page = db.session.query(Device) \
-                             .join(DeviceTemplateMap) \
+                             .join(DeviceTemplateMap, isouter=True) \
                              .join(DeviceTemplate) \
-                             .join(DeviceAttr) \
+                             .join(DeviceAttr, isouter=True) \
                              .filter(*parsed_query) \
                              .paginate(**pagination)
         else:
