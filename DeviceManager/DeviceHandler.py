@@ -36,6 +36,21 @@ LOGGER = logging.getLogger('device-manager.' + __name__)
 LOGGER.addHandler(logging.StreamHandler())
 LOGGER.setLevel(logging.INFO)
 
+def serialize_override_attrs(orm_overrides, attrs):
+    for override in orm_overrides:
+        if override.attr.template_id is not None:
+            for attr in attrs[override.attr.template_id]:
+                if attr['id'] == override.aid:
+                    attr['static_value'] = override.static_value
+        else:
+            # If override attr does not have template_id it means we have a metadata override
+            # TODO: Here we do not handle multiple hierarchical levels of metadata
+            for attr in attrs[override.attr.parent.template_id]:
+                if attr['id'] == override.attr.parent_id:
+                    for metadata in attr['metadata']:
+                        if metadata['id'] == override.aid:
+                            metadata['static_value'] = override.static_value
+
 def serialize_full_device(orm_device, tenant, sensitive_data=False, status_cache=None):
     data = device_schema.dump(orm_device)
     data['attrs'] = {}
@@ -47,10 +62,8 @@ def serialize_full_device(orm_device, tenant, sensitive_data=False, status_cache
 
     data['status'] = status_cache.get(orm_device.id, 'offline')
 
-    for override in orm_device.overrides:
-        for attr in data['attrs'][override.attr.template_id]:
-            if attr['id'] == override.aid:
-                attr['static_value'] = override.static_value
+    # Override device regular and metadata attributes
+    serialize_override_attrs(orm_device.overrides, data['attrs'])
 
     if sensitive_data:
         for psk_data in orm_device.pre_shared_keys:
@@ -67,6 +80,50 @@ def find_template(template_list, id):
         if template.id == int(id):
             return template
 
+def create_orm_override(attr, orm_device, orm_template):
+    try:
+        target = int(attr['id'])
+    except ValueError:
+        raise HTTPRequestError(400, "Unknown attribute \"{}\" in override list".format(attr['id']))
+
+    found = False
+    for orm_attr in orm_template.attrs:
+        if target == orm_attr.id:
+            found = True
+            if 'static_value' in attr:
+                orm_override = DeviceOverride(
+                    device=orm_device,
+                    attr=orm_attr,
+                    static_value=attr['static_value']
+                )
+                db.session.add(orm_override)
+
+            # Update possible metadata field
+            if 'metadata' in attr:
+                for metadata in attr['metadata']:
+                    try:
+                        metadata_target = int(metadata['id'])
+                    except ValueError:
+                        raise HTTPRequestError(400, "Unknown metadata attribute \"{}\" in override list".format(
+                            metadata['id']))
+
+                    found = False
+                    # WARNING: Adds no-autoflush here, without it metadata override fail during device update
+                    with db.session.no_autoflush:
+                        for orm_attr_child in orm_attr.children:
+                            if metadata_target == orm_attr_child.id:
+                                found = True
+                                if 'static_value' in metadata:
+                                    orm_override = DeviceOverride(
+                                        device=orm_device,
+                                        attr=orm_attr_child,
+                                        static_value=metadata['static_value']
+                                    )
+                                    db.session.add(orm_override)
+
+    if not found:
+        raise HTTPRequestError(400, "Unknown attribute \"{}\" in override list".format(target))
+
 def auto_create_template(json_payload, new_device):
     if ('attrs' in json_payload) and (new_device.templates is None):
         device_template = DeviceTemplate(
@@ -81,24 +138,7 @@ def auto_create_template(json_payload, new_device):
             orm_template = find_template(new_device.templates, attr['template_id'])
             if orm_template is None:
                 raise HTTPRequestError(400, 'Unknown template "{}" in attr list'.format(orm_template))
-
-            try:
-                target = int(attr['id'])
-            except ValueError:
-                raise HTTPRequestError(400, "Unkown attribute \"{}\" in override list".format(attr['id']))
-
-            found = False
-            for orm_attr in orm_template.attrs:
-                if target == orm_attr.id:
-                    found = True
-                    orm_override = DeviceOverride(
-                        device=new_device,
-                        attr=orm_attr,
-                        static_value=attr['static_value']
-                    )
-                    db.session.add(orm_override)
-            if not found:
-                raise HTTPRequestError(400, "Unkown attribute \"{}\" in override list".format(target))
+            create_orm_override(attr, new_device, orm_template)
 
 def parse_template_list(template_list, new_device):
     new_device.templates = []
@@ -211,8 +251,13 @@ class DeviceHandler(object):
         target_label = req.args.get('label', None)
         if target_label:
             label_filter.append("devices.label like '%{}%'".format(target_label))
-
-        if label_filter or attr_filter:
+        
+        template_filter = []
+        target_template = req.args.get('template', None)
+        if target_template:
+            template_filter.append("device_template.template_id = {}".format(target_template))
+        
+        if template_filter or label_filter or attr_filter:
             # find all devices that contain matching attributes (may contain devices that
             # do not match all required attributes)
             subquery = db.session.query(func.count(Device.id).label('count'), Device.id) \
@@ -221,16 +266,28 @@ class DeviceHandler(object):
                                  .join(DeviceAttr, isouter=True) \
                                  .join(DeviceOverride, (Device.id == DeviceOverride.did) & (DeviceAttr.id == DeviceOverride.aid), isouter=True) \
                                  .filter(or_(*attr_filter)) \
+                                 .filter(*label_filter) \
+                                 .filter(*template_filter) \
                                  .group_by(Device.id) \
                                  .subquery()
-
             # devices must match all supplied filters
-            page = db.session.query(Device) \
+            if (len(attr_filter)):
+                page = db.session.query(Device) \
+                             .join(DeviceTemplateMap) \
                              .join(subquery, subquery.c.id == Device.id) \
                              .filter(subquery.c.count == len(attr_filter)) \
                              .filter(*label_filter) \
+                             .filter(*template_filter) \
                              .order_by(sortBy) \
                              .paginate(**pagination)
+            else: # only filter by label
+                page = db.session.query(Device) \
+                        .join(DeviceTemplateMap) \
+                        .join(subquery, subquery.c.id == Device.id) \
+                        .filter(*label_filter) \
+                        .filter(*template_filter) \
+                        .order_by(sortBy) \
+                        .paginate(**pagination)
         else:
             page = db.session.query(Device).order_by(sortBy).paginate(**pagination)
 
@@ -318,6 +375,7 @@ class DeviceHandler(object):
             subs_handler = None
 
         full_device = None
+        orm_devices = []
 
         for i in range(0, count):
             device_data, json_payload = parse_payload(req, device_schema)
@@ -329,11 +387,18 @@ class DeviceHandler(object):
             parse_template_list(json_payload.get('templates', []), orm_device)
             auto_create_template(json_payload, orm_device)
             db.session.add(orm_device)
+            orm_devices.append(orm_device)
 
+        try:
+            db.session.commit()
+        except IntegrityError as error:
+            handle_consistency_exception(error)
+
+        for orm_device in orm_devices:
             devices.append(
                 {
-                    'id': device_data['id'],
-                    'label': device_data['label']
+                    'id': orm_device.id,
+                    'label': orm_device.label
                 }
             )
 
@@ -351,10 +416,6 @@ class DeviceHandler(object):
                 sub_id = subs_handler.create(full_device['id'], type_descr)
                 orm_device.persistence = sub_id
 
-        try:
-            db.session.commit()
-        except IntegrityError as error:
-            handle_consistency_exception(error)
 
         if verbose:
             result = {
@@ -430,6 +491,11 @@ class DeviceHandler(object):
         updated_orm_device.created = old_orm_device.created
 
         db.session.add(updated_orm_device)
+        try:
+            db.session.commit()
+        except IntegrityError as error:
+            # This will throw an exception.
+            handle_consistency_exception(error)
 
         full_device = serialize_full_device(updated_orm_device, tenant)
 
@@ -450,11 +516,6 @@ class DeviceHandler(object):
 
         kafka_handler = KafkaHandler()
         kafka_handler.update(full_device, meta={"service": tenant})
-
-        try:
-            db.session.commit()
-        except IntegrityError as error:
-            handle_consistency_exception(error)
 
         result = {
             'message': 'device updated',
@@ -592,7 +653,6 @@ class DeviceHandler(object):
         :rtype JSON
         """
         tenant = init_tenant_context(req, db)
-
         page_number, per_page = get_pagination(req)
         page = (
             db.session.query(Device)
